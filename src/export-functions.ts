@@ -8,7 +8,7 @@ function getDirnameFromFilename(__filename: string) {
   return __filename.split(sep).slice(0, -1).join(sep);
 }
 
-export function funcNameFromRelPathDefault(relPath: string): string {
+export function funcNameFromRelPathDefault(relPath: string): string[] {
   const relPathArray = relPath.split(sep); /* ? */
   const fileName = relPathArray.pop(); /* ? */
   const relDirPathFunctionNameChunk = relPathArray.map((pathFragment) => camelCase(pathFragment)).join(sep);
@@ -16,7 +16,7 @@ export function funcNameFromRelPathDefault(relPath: string): string {
   const funcName = relDirPathFunctionNameChunk
     ? `${relDirPathFunctionNameChunk}${sep}${fileNameFunctionNameChunk}`
     : fileNameFunctionNameChunk;
-  return funcName.split(sep).join('-');
+  return [funcName.split(sep).join('-')];
 }
 
 /**
@@ -82,7 +82,7 @@ export interface ExportFunctionsConfig {
    *
    * @returns `string` function name is returned as a string
    */
-  funcNameFromRelPath?(relativePath: string): string;
+  funcNameFromRelPath?: (relativePath: string) => string[];
 
   /**
    * This function controls how the function trigger is found in the loaded module.
@@ -96,7 +96,7 @@ export interface ExportFunctionsConfig {
    * @returns must return the actual function trigger to be exported to firebase functions.
    * @example exportFunctions({extractTrigger: (obj) => obj['default']})
    */
-  extractTrigger?: (inputModule: any, currentFunctionName?: string) => any;
+  extractTrigger?: (inputModule: any, theFunction?: string, currentFunctionName?: string) => any;
 
   /**
    * Boolean value - wether to enable logging performance metrics
@@ -138,9 +138,9 @@ const isDeployment = () => !getFunctionInstance();
 const funcNameMatchesInstance = (funcName: string) => funcName === getFunctionInstance();
 const getTriggerFromModule = (inputModule: any) => inputModule?.default;
 
-const coldModuleMsg = '[better-firebase-functions] Load Module (Cold-Start)';
-const dirSearchMsg = '[better-firebase-functions] Directory Glob Search';
-const deployMsg = '[better-firebase-functions] Load & Export Modules (Deployment)';
+const coldModuleMsg = '[better-firebase-functions-imp] Load Module (Cold-Start)';
+const dirSearchMsg = '[better-firebase-functions-imp] Directory Glob Search';
+const deployMsg = '[better-firebase-functions-imp] Load & Export Modules (Deployment)';
 
 /**
  * This function will search the given directory using provided glob matching pattern and
@@ -180,7 +180,8 @@ export function exportFunctions({
   const files = globSync(searchGlob, { cwd }); /* ? */
   log.timeEnd(dirSearchMsg);
 
-  const moduleSearchMsg = `[better-firebase-functions] Search for Module '${getFunctionInstance()}'`;
+  console.log(`Found ${files.length} matching files`);
+  const moduleSearchMsg = `[better-firebase-functions-imp] Search for Module '${getFunctionInstance()}'`;
   if (isDeployment()) log.time(deployMsg);
   else log.time(moduleSearchMsg);
 
@@ -188,29 +189,31 @@ export function exportFunctions({
   for (const file of files) {
     const absPath = resolve(cwd, file);
     const normalizedRelativePath = absPath.slice(cwd.length + 1); // * This step normalises glob match search string
-    const funcName = funcNameFromRelPath(normalizedRelativePath); /* ? */
-    if (!isDeployment() && !funcNameMatchesInstance(funcName)) continue;
-    if (!isDeployment()) log.timeEnd(moduleSearchMsg);
+    const funcNames = funcNameFromRelPath(normalizedRelativePath); /* ? */
     if (absPath.slice(0, -2) === __filename.slice(0, -2)) continue; // Prevent exporting self
-
-    if (exportPathMode) {
-      set(exports, funcName.split('-'), normalizedRelativePath);
-      continue;
-    }
-    if (!isDeployment()) log.time(coldModuleMsg);
-    let funcTrigger: any;
-    try {
-      // eslint-disable-next-line no-eval
-      const mod = eval('require')(absPath); // This is to preserve require call in webpack
-      funcTrigger = extractTrigger(mod, getFunctionInstance());
-    } catch (err) {
-      console.warn(err);
-      continue;
-    }
-    if (!isDeployment()) log.timeEnd(coldModuleMsg);
-    if (!funcTrigger) continue;
-    const propPath = funcName.split('-');
-    set(exports, propPath, funcTrigger);
+    if (!isDeployment()) log.timeEnd(moduleSearchMsg);
+    funcNames.forEach((funcName) => {
+      if (!isDeployment() && !funcNameMatchesInstance(funcName)) return;
+      if (exportPathMode) {
+        set(exports, funcName.split('-'), normalizedRelativePath);
+        return;
+      }
+      if (!isDeployment()) log.time(coldModuleMsg);
+      let funcTrigger: any;
+      try {
+        // eslint-disable-next-line no-eval
+        const mod = eval('require')(absPath); // This is to preserve require call in webpack
+        funcTrigger = extractTrigger(mod, funcName, getFunctionInstance());
+      } catch (err) {
+        console.warn(err);
+        return;
+      }
+      if (!isDeployment()) log.timeEnd(coldModuleMsg);
+      if (!funcTrigger) return;
+      const propPath = funcName.split('-');
+      console.log(`adding ${propPath} to exports`);
+      set(exports, propPath, funcTrigger);
+    });
   }
 
   if (isDeployment()) log.timeEnd(deployMsg);
